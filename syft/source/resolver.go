@@ -2,6 +2,7 @@ package source
 
 import (
 	"fmt"
+	"io"
 
 	"github.com/anchore/stereoscope/pkg/image"
 )
@@ -14,13 +15,15 @@ type Resolver interface {
 
 // ContentResolver knows how to get file content for given file.References
 type ContentResolver interface {
-	FileContentsByLocation(Location) (string, error)
-	MultipleFileContentsByLocation([]Location) (map[Location]string, error)
-	// TODO: we should consider refactoring to return a set of io.Readers or file.Openers instead of the full contents themselves (allow for optional buffering).
+	FileContentsByLocation(Location) (io.ReadCloser, error)
+	// TODO: it is possible to be given duplicate locations that will be overridden in the map (key), a subtle problem that coule easily be misued.
+	MultipleFileContentsByLocation([]Location) (map[Location]io.ReadCloser, error)
 }
 
-// FileResolver knows how to get file.References for given string paths and globs
+// FileResolver knows how to get a Location for given string paths and globs
 type FileResolver interface {
+	// HasPath indicates if the given path exists in the underlying source.
+	HasPath(path string) bool
 	// FilesByPath fetches a set of file references which have the given path (for an image, there may be multiple matches)
 	FilesByPath(paths ...string) ([]Location, error)
 	// FilesByGlob fetches a set of file references which the given glob matches

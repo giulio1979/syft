@@ -6,11 +6,12 @@ import (
 
 func TestDirectoryResolver_FilesByPath(t *testing.T) {
 	cases := []struct {
-		name     string
-		root     string
-		input    string
-		expected string
-		refCount int
+		name                 string
+		root                 string
+		input                string
+		expected             string
+		refCount             int
+		forcePositiveHasPath bool
 	}{
 		{
 			name:     "finds a file (relative)",
@@ -47,15 +48,28 @@ func TestDirectoryResolver_FilesByPath(t *testing.T) {
 			refCount: 1,
 		},
 		{
-			name:     "directories ignored",
-			root:     "./test-fixtures/",
-			input:    "/image-symlinks",
-			refCount: 0,
+			name:                 "directories ignored",
+			root:                 "./test-fixtures/",
+			input:                "/image-symlinks",
+			refCount:             0,
+			forcePositiveHasPath: true,
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			resolver := DirectoryResolver{c.root}
+
+			hasPath := resolver.HasPath(c.input)
+			if !c.forcePositiveHasPath {
+				if c.refCount != 0 && !hasPath {
+					t.Errorf("expected HasPath() to indicate existance, but did not")
+				} else if c.refCount == 0 && hasPath {
+					t.Errorf("expeced HasPath() to NOT indicate existance, but does")
+				}
+			} else if !hasPath {
+				t.Errorf("expected HasPath() to indicate existance, but did not (force path)")
+			}
+
 			refs, err := resolver.FilesByPath(c.input)
 			if err != nil {
 				t.Fatalf("could not use resolver: %+v, %+v", err, refs)
@@ -66,8 +80,8 @@ func TestDirectoryResolver_FilesByPath(t *testing.T) {
 			}
 
 			for _, actual := range refs {
-				if actual.Path != c.expected {
-					t.Errorf("bad resolve path: '%s'!='%s'", actual.Path, c.expected)
+				if actual.RealPath != c.expected {
+					t.Errorf("bad resolve path: '%s'!='%s'", actual.RealPath, c.expected)
 				}
 			}
 		})
@@ -171,8 +185,9 @@ func TestDirectoryResolver_FilesByGlobMultiple(t *testing.T) {
 			t.Fatalf("could not use resolver: %+v, %+v", err, refs)
 		}
 
-		if len(refs) != 2 {
-			t.Errorf("unexpected number of refs: %d != 2", len(refs))
+		expected := 2
+		if len(refs) != expected {
+			t.Errorf("unexpected number of refs: %d != %d", len(refs), expected)
 		}
 
 	})
@@ -187,8 +202,9 @@ func TestDirectoryResolver_FilesByGlobRecursive(t *testing.T) {
 			t.Fatalf("could not use resolver: %+v, %+v", err, refs)
 		}
 
-		if len(refs) != 4 {
-			t.Errorf("unexpected number of refs: %d != 4", len(refs))
+		expected := 6
+		if len(refs) != expected {
+			t.Errorf("unexpected number of refs: %d != %d", len(refs), expected)
 		}
 
 	})
@@ -202,8 +218,9 @@ func TestDirectoryResolver_FilesByGlobSingle(t *testing.T) {
 			t.Fatalf("could not use resolver: %+v, %+v", err, refs)
 		}
 
-		if len(refs) != 1 {
-			t.Errorf("unexpected number of refs: %d != 1", len(refs))
+		expected := 1
+		if len(refs) != expected {
+			t.Errorf("unexpected number of refs: %d != %d", len(refs), expected)
 		}
 
 	})

@@ -13,9 +13,10 @@ type resolution struct {
 
 func TestAllLayersResolver_FilesByPath(t *testing.T) {
 	cases := []struct {
-		name        string
-		linkPath    string
-		resolutions []resolution
+		name                 string
+		linkPath             string
+		resolutions          []resolution
+		forcePositiveHasPath bool
 	}{
 		{
 			name:     "link with previous data",
@@ -42,10 +43,6 @@ func TestAllLayersResolver_FilesByPath(t *testing.T) {
 			linkPath: "/link-2",
 			resolutions: []resolution{
 				{
-					layer: 3,
-					path:  "/link-2",
-				},
-				{
 					layer: 4,
 					path:  "/file-2.txt",
 				},
@@ -70,19 +67,17 @@ func TestAllLayersResolver_FilesByPath(t *testing.T) {
 			},
 		},
 		{
-			name:     "dead link",
-			linkPath: "/link-dead",
-			resolutions: []resolution{
-				{
-					layer: 8,
-					path:  "/link-dead",
-				},
-			},
+			name:                 "dead link",
+			linkPath:             "/link-dead",
+			resolutions:          []resolution{},
+			forcePositiveHasPath: true,
 		},
 		{
 			name:        "ignore directories",
 			linkPath:    "/bin",
 			resolutions: []resolution{},
+			// directories don't resolve BUT do exist
+			forcePositiveHasPath: true,
 		},
 	}
 	for _, c := range cases {
@@ -93,6 +88,17 @@ func TestAllLayersResolver_FilesByPath(t *testing.T) {
 			resolver, err := NewAllLayersResolver(img)
 			if err != nil {
 				t.Fatalf("could not create resolver: %+v", err)
+			}
+
+			hasPath := resolver.HasPath(c.linkPath)
+			if !c.forcePositiveHasPath {
+				if len(c.resolutions) > 0 && !hasPath {
+					t.Errorf("expected HasPath() to indicate existance, but did not")
+				} else if len(c.resolutions) == 0 && hasPath {
+					t.Errorf("expeced HasPath() to NOT indicate existance, but does")
+				}
+			} else if !hasPath {
+				t.Errorf("expected HasPath() to indicate existance, but did not (force path)")
 			}
 
 			refs, err := resolver.FilesByPath(c.linkPath)
@@ -107,8 +113,12 @@ func TestAllLayersResolver_FilesByPath(t *testing.T) {
 			for idx, actual := range refs {
 				expected := c.resolutions[idx]
 
-				if actual.Path != expected.path {
-					t.Errorf("bad resolve path: '%s'!='%s'", actual.Path, expected.path)
+				if string(actual.ref.RealPath) != expected.path {
+					t.Errorf("bad resolve path: '%s'!='%s'", string(actual.ref.RealPath), expected.path)
+				}
+
+				if expected.path != "" && string(actual.ref.RealPath) != actual.RealPath {
+					t.Errorf("we should always prefer real paths over ones with links")
 				}
 
 				entry, err := img.FileCatalog.Get(actual.ref)
@@ -116,8 +126,8 @@ func TestAllLayersResolver_FilesByPath(t *testing.T) {
 					t.Fatalf("failed to get metadata: %+v", err)
 				}
 
-				if entry.Source.Metadata.Index != expected.layer {
-					t.Errorf("bad resolve layer: '%d'!='%d'", entry.Source.Metadata.Index, expected.layer)
+				if entry.Layer.Metadata.Index != expected.layer {
+					t.Errorf("bad resolve layer: '%d'!='%d'", entry.Layer.Metadata.Index, expected.layer)
 				}
 			}
 		})
@@ -132,7 +142,7 @@ func TestAllLayersResolver_FilesByGlob(t *testing.T) {
 	}{
 		{
 			name: "link with previous data",
-			glob: "**ink-1",
+			glob: "**/*ink-1",
 			resolutions: []resolution{
 				{
 					layer: 1,
@@ -142,7 +152,7 @@ func TestAllLayersResolver_FilesByGlob(t *testing.T) {
 		},
 		{
 			name: "link with in layer data",
-			glob: "**nk-within",
+			glob: "**/*nk-within",
 			resolutions: []resolution{
 				{
 					layer: 5,
@@ -152,12 +162,8 @@ func TestAllLayersResolver_FilesByGlob(t *testing.T) {
 		},
 		{
 			name: "link with overridden data",
-			glob: "**ink-2",
+			glob: "**/*ink-2",
 			resolutions: []resolution{
-				{
-					layer: 3,
-					path:  "/link-2",
-				},
 				{
 					layer: 4,
 					path:  "/file-2.txt",
@@ -170,7 +176,7 @@ func TestAllLayersResolver_FilesByGlob(t *testing.T) {
 		},
 		{
 			name: "indirect link (with overridden data)",
-			glob: "**nk-indirect",
+			glob: "**/*nk-indirect",
 			resolutions: []resolution{
 				{
 					layer: 4,
@@ -183,14 +189,9 @@ func TestAllLayersResolver_FilesByGlob(t *testing.T) {
 			},
 		},
 		{
-			name: "dead link",
-			glob: "**k-dead",
-			resolutions: []resolution{
-				{
-					layer: 8,
-					path:  "/link-dead",
-				},
-			},
+			name:        "dead link",
+			glob:        "**/*k-dead",
+			resolutions: []resolution{},
 		},
 		{
 			name:        "ignore directories",
@@ -220,8 +221,12 @@ func TestAllLayersResolver_FilesByGlob(t *testing.T) {
 			for idx, actual := range refs {
 				expected := c.resolutions[idx]
 
-				if actual.Path != expected.path {
-					t.Errorf("bad resolve path: '%s'!='%s'", actual.Path, expected.path)
+				if string(actual.ref.RealPath) != expected.path {
+					t.Errorf("bad resolve path: '%s'!='%s'", string(actual.ref.RealPath), expected.path)
+				}
+
+				if expected.path != "" && string(actual.ref.RealPath) != actual.RealPath {
+					t.Errorf("we should always prefer real paths over ones with links")
 				}
 
 				entry, err := img.FileCatalog.Get(actual.ref)
@@ -229,8 +234,8 @@ func TestAllLayersResolver_FilesByGlob(t *testing.T) {
 					t.Fatalf("failed to get metadata: %+v", err)
 				}
 
-				if entry.Source.Metadata.Index != expected.layer {
-					t.Errorf("bad resolve layer: '%d'!='%d'", entry.Source.Metadata.Index, expected.layer)
+				if entry.Layer.Metadata.Index != expected.layer {
+					t.Errorf("bad resolve layer: '%d'!='%d'", entry.Layer.Metadata.Index, expected.layer)
 				}
 			}
 		})

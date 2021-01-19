@@ -2,10 +2,15 @@ package source
 
 import (
 	"archive/tar"
+	"bytes"
 	"fmt"
+	"io"
+	"io/ioutil"
 
 	"github.com/anchore/stereoscope/pkg/file"
+	"github.com/anchore/stereoscope/pkg/filetree"
 	"github.com/anchore/stereoscope/pkg/image"
+	"github.com/anchore/syft/internal/log"
 )
 
 var _ Resolver = (*AllLayersResolver)(nil)
@@ -30,6 +35,18 @@ func NewAllLayersResolver(img *image.Image) (*AllLayersResolver, error) {
 		img:    img,
 		layers: layers,
 	}, nil
+}
+
+// HasPath indicates if the given path exists in the underlying source.
+func (r *AllLayersResolver) HasPath(path string) bool {
+	p := file.Path(path)
+	for _, layerIdx := range r.layers {
+		tree := r.img.Layers[layerIdx].Tree
+		if tree.HasPath(p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *AllLayersResolver) fileByRef(ref file.Reference, uniqueFileIDs file.ReferenceSet, layerIdx int) ([]file.Reference, error) {
@@ -70,19 +87,22 @@ func (r *AllLayersResolver) FilesByPath(paths ...string) ([]Location, error) {
 	for _, path := range paths {
 		for idx, layerIdx := range r.layers {
 			tree := r.img.Layers[layerIdx].Tree
-			ref := tree.File(file.Path(path))
+			_, ref, err := tree.File(file.Path(path), filetree.FollowBasenameLinks, filetree.DoNotFollowDeadBasenameLinks)
+			if err != nil {
+				return nil, err
+			}
 			if ref == nil {
 				// no file found, keep looking through layers
 				continue
 			}
 
 			// don't consider directories (special case: there is no path information for /)
-			if ref.Path == "/" {
+			if ref.RealPath == "/" {
 				continue
 			} else if r.img.FileCatalog.Exists(*ref) {
 				metadata, err := r.img.FileCatalog.Get(*ref)
 				if err != nil {
-					return nil, fmt.Errorf("unable to get file metadata for path=%q: %w", ref.Path, err)
+					return nil, fmt.Errorf("unable to get file metadata for path=%q: %w", ref.RealPath, err)
 				}
 				if metadata.Metadata.IsDir {
 					continue
@@ -94,7 +114,7 @@ func (r *AllLayersResolver) FilesByPath(paths ...string) ([]Location, error) {
 				return nil, err
 			}
 			for _, result := range results {
-				uniqueLocations = append(uniqueLocations, NewLocationFromImage(result, r.img))
+				uniqueLocations = append(uniqueLocations, NewLocationFromImage(path, result, r.img))
 			}
 		}
 	}
@@ -109,31 +129,31 @@ func (r *AllLayersResolver) FilesByGlob(patterns ...string) ([]Location, error) 
 
 	for _, pattern := range patterns {
 		for idx, layerIdx := range r.layers {
-			refs, err := r.img.Layers[layerIdx].Tree.FilesByGlob(pattern)
+			results, err := r.img.Layers[layerIdx].Tree.FilesByGlob(pattern, filetree.DoNotFollowDeadBasenameLinks)
 			if err != nil {
 				return nil, fmt.Errorf("failed to resolve files by glob (%s): %w", pattern, err)
 			}
 
-			for _, ref := range refs {
+			for _, result := range results {
 				// don't consider directories (special case: there is no path information for /)
-				if ref.Path == "/" {
+				if result.RealPath == "/" {
 					continue
-				} else if r.img.FileCatalog.Exists(ref) {
-					metadata, err := r.img.FileCatalog.Get(ref)
+				} else if r.img.FileCatalog.Exists(result.Reference) {
+					metadata, err := r.img.FileCatalog.Get(result.Reference)
 					if err != nil {
-						return nil, fmt.Errorf("unable to get file metadata for path=%q: %w", ref.Path, err)
+						return nil, fmt.Errorf("unable to get file metadata for path=%q: %w", result.MatchPath, err)
 					}
 					if metadata.Metadata.IsDir {
 						continue
 					}
 				}
 
-				results, err := r.fileByRef(ref, uniqueFileIDs, idx)
+				refResults, err := r.fileByRef(result.Reference, uniqueFileIDs, idx)
 				if err != nil {
 					return nil, err
 				}
-				for _, result := range results {
-					uniqueLocations = append(uniqueLocations, NewLocationFromImage(result, r.img))
+				for _, refResult := range refResults {
+					uniqueLocations = append(uniqueLocations, NewLocationFromImage(string(result.MatchPath), refResult, r.img))
 				}
 			}
 		}
@@ -150,37 +170,41 @@ func (r *AllLayersResolver) RelativeFileByPath(location Location, path string) *
 		return nil
 	}
 
-	relativeRef := entry.Source.SquashedTree.File(file.Path(path))
-	if relativeRef == nil {
+	exists, relativeRef, err := entry.Layer.SquashedTree.File(file.Path(path), filetree.FollowBasenameLinks)
+	if err != nil {
+		log.Errorf("failed to find path=%q in squash: %+w", path, err)
+		return nil
+	}
+	if !exists && relativeRef == nil {
 		return nil
 	}
 
-	relativeLocation := NewLocationFromImage(*relativeRef, r.img)
+	relativeLocation := NewLocationFromImage(path, *relativeRef, r.img)
 
 	return &relativeLocation
 }
 
 // MultipleFileContentsByLocation returns the file contents for all file.References relative to the image. Note that a
 // file.Reference is a path relative to a particular layer.
-func (r *AllLayersResolver) MultipleFileContentsByLocation(locations []Location) (map[Location]string, error) {
+func (r *AllLayersResolver) MultipleFileContentsByLocation(locations []Location) (map[Location]io.ReadCloser, error) {
 	return mapLocationRefs(r.img.MultipleFileContentsByRef, locations)
 }
 
 // FileContentsByLocation fetches file contents for a single file reference, irregardless of the source layer.
 // If the path does not exist an error is returned.
-func (r *AllLayersResolver) FileContentsByLocation(location Location) (string, error) {
+func (r *AllLayersResolver) FileContentsByLocation(location Location) (io.ReadCloser, error) {
 	return r.img.FileContentsByRef(location.ref)
 }
 
-type multiContentFetcher func(refs ...file.Reference) (map[file.Reference]string, error)
+type multiContentFetcher func(refs ...file.Reference) (map[file.Reference]io.ReadCloser, error)
 
-func mapLocationRefs(callback multiContentFetcher, locations []Location) (map[Location]string, error) {
+func mapLocationRefs(callback multiContentFetcher, locations []Location) (map[Location]io.ReadCloser, error) {
 	var fileRefs = make([]file.Reference, len(locations))
-	var locationByRefs = make(map[file.Reference]Location)
-	var results = make(map[Location]string)
+	var locationByRefs = make(map[file.Reference][]Location)
+	var results = make(map[Location]io.ReadCloser)
 
 	for i, location := range locations {
-		locationByRefs[location.ref] = location
+		locationByRefs[location.ref] = append(locationByRefs[location.ref], location)
 		fileRefs[i] = location.ref
 	}
 
@@ -189,8 +213,26 @@ func mapLocationRefs(callback multiContentFetcher, locations []Location) (map[Lo
 		return nil, err
 	}
 
+	// TODO: this is not tested, we need a test case that covers a mapLocationRefs which has multiple Locations with the same reference in the request. The io.Reader should be copied.
 	for ref, content := range contentsByRef {
-		results[locationByRefs[ref]] = content
+		mappedLocations := locationByRefs[ref]
+		switch {
+		case len(mappedLocations) > 1:
+			// TODO: fixme... this can lead to lots of unexpected memory usage in unusual circumstances (cache is not leveraged for large files).
+			// stereoscope wont duplicate content requests if the caller asks for the same file multiple times... thats up to the caller
+			contentsBytes, err := ioutil.ReadAll(content)
+			if err != nil {
+				return nil, fmt.Errorf("unable to read ref=%+v :%w", ref, err)
+			}
+			for _, loc := range mappedLocations {
+				results[loc] = ioutil.NopCloser(bytes.NewReader(contentsBytes))
+			}
+
+		case len(mappedLocations) == 1:
+			results[locationByRefs[ref][0]] = content
+		default:
+			return nil, fmt.Errorf("unexpected ref-location count=%d for ref=%v", len(mappedLocations), ref)
+		}
 	}
 	return results, nil
 }

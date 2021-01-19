@@ -31,7 +31,7 @@ func TestCatalogFromJSON(t *testing.T) {
 			tarPath := imagetest.GetFixtureImageTarPath(t, test.fixture)
 			defer cleanup()
 
-			expectedSource, expectedCatalog, expectedDistro, err := syft.Catalog("docker-archive:"+tarPath, source.AllLayersScope)
+			expectedSource, expectedCatalog, expectedDistro, err := syft.Catalog("docker-archive:"+tarPath, source.SquashedScope)
 			if err != nil {
 				t.Fatalf("failed to catalog image: %+v", err)
 			}
@@ -79,6 +79,12 @@ func TestCatalogFromJSON(t *testing.T) {
 					metadata := e.Metadata.(pkg.JavaMetadata)
 					metadata.Parent = nil
 					e.Metadata = metadata
+				}
+
+				// ignore the virtual path on the location for now
+				for l := range a.Locations {
+					a.Locations[l].VirtualPath = ""
+					e.Locations[l].VirtualPath = ""
 				}
 
 				for _, d := range deep.Equal(a, e) {

@@ -2,8 +2,10 @@ package source
 
 import (
 	"fmt"
+	"io"
 
 	"github.com/anchore/stereoscope/pkg/file"
+	"github.com/anchore/stereoscope/pkg/filetree"
 	"github.com/anchore/stereoscope/pkg/image"
 )
 
@@ -22,6 +24,11 @@ func NewImageSquashResolver(img *image.Image) (*ImageSquashResolver, error) {
 	return &ImageSquashResolver{img: img}, nil
 }
 
+// HasPath indicates if the given path exists in the underlying source.
+func (r *ImageSquashResolver) HasPath(path string) bool {
+	return r.img.SquashedTree().HasPath(file.Path(path))
+}
+
 // FilesByPath returns all file.References that match the given paths within the squashed representation of the image.
 func (r *ImageSquashResolver) FilesByPath(paths ...string) ([]Location, error) {
 	uniqueFileIDs := file.NewFileReferenceSet()
@@ -29,19 +36,22 @@ func (r *ImageSquashResolver) FilesByPath(paths ...string) ([]Location, error) {
 
 	for _, path := range paths {
 		tree := r.img.SquashedTree()
-		ref := tree.File(file.Path(path))
+		_, ref, err := tree.File(file.Path(path), filetree.FollowBasenameLinks)
+		if err != nil {
+			return nil, err
+		}
 		if ref == nil {
 			// no file found, keep looking through layers
 			continue
 		}
 
 		// don't consider directories (special case: there is no path information for /)
-		if ref.Path == "/" {
+		if ref.RealPath == "/" {
 			continue
 		} else if r.img.FileCatalog.Exists(*ref) {
 			metadata, err := r.img.FileCatalog.Get(*ref)
 			if err != nil {
-				return nil, fmt.Errorf("unable to get file metadata for path=%q: %w", ref.Path, err)
+				return nil, fmt.Errorf("unable to get file metadata for path=%q: %w", ref.RealPath, err)
 			}
 			if metadata.Metadata.IsDir {
 				continue
@@ -56,7 +66,7 @@ func (r *ImageSquashResolver) FilesByPath(paths ...string) ([]Location, error) {
 
 		if resolvedRef != nil && !uniqueFileIDs.Contains(*resolvedRef) {
 			uniqueFileIDs.Add(*resolvedRef)
-			uniqueLocations = append(uniqueLocations, NewLocationFromImage(*resolvedRef, r.img))
+			uniqueLocations = append(uniqueLocations, NewLocationFromImage(path, *resolvedRef, r.img))
 		}
 	}
 
@@ -69,28 +79,28 @@ func (r *ImageSquashResolver) FilesByGlob(patterns ...string) ([]Location, error
 	uniqueLocations := make([]Location, 0)
 
 	for _, pattern := range patterns {
-		refs, err := r.img.SquashedTree().FilesByGlob(pattern)
+		results, err := r.img.SquashedTree().FilesByGlob(pattern)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve files by glob (%s): %w", pattern, err)
 		}
 
-		for _, ref := range refs {
+		for _, result := range results {
 			// don't consider directories (special case: there is no path information for /)
-			if ref.Path == "/" {
+			if result.MatchPath == "/" {
 				continue
-			} else if r.img.FileCatalog.Exists(ref) {
-				metadata, err := r.img.FileCatalog.Get(ref)
+			} else if r.img.FileCatalog.Exists(result.Reference) {
+				metadata, err := r.img.FileCatalog.Get(result.Reference)
 				if err != nil {
-					return nil, fmt.Errorf("unable to get file metadata for path=%q: %w", ref.Path, err)
+					return nil, fmt.Errorf("unable to get file metadata for path=%q: %w", result.MatchPath, err)
 				}
 				if metadata.Metadata.IsDir {
 					continue
 				}
 			}
 
-			resolvedLocations, err := r.FilesByPath(string(ref.Path))
+			resolvedLocations, err := r.FilesByPath(string(result.MatchPath))
 			if err != nil {
-				return nil, fmt.Errorf("failed to find files by path (ref=%+v): %w", ref, err)
+				return nil, fmt.Errorf("failed to find files by path (result=%+v): %w", result, err)
 			}
 			for _, resolvedLocation := range resolvedLocations {
 				if !uniqueFileIDs.Contains(resolvedLocation.ref) {
@@ -121,12 +131,12 @@ func (r *ImageSquashResolver) RelativeFileByPath(_ Location, path string) *Locat
 
 // MultipleFileContentsByLocation returns the file contents for all file.References relative to the image. Note that a
 // file.Reference is a path relative to a particular layer, in this case only from the squashed representation.
-func (r *ImageSquashResolver) MultipleFileContentsByLocation(locations []Location) (map[Location]string, error) {
+func (r *ImageSquashResolver) MultipleFileContentsByLocation(locations []Location) (map[Location]io.ReadCloser, error) {
 	return mapLocationRefs(r.img.MultipleFileContentsByRef, locations)
 }
 
 // FileContentsByLocation fetches file contents for a single file reference, irregardless of the source layer.
 // If the path does not exist an error is returned.
-func (r *ImageSquashResolver) FileContentsByLocation(location Location) (string, error) {
+func (r *ImageSquashResolver) FileContentsByLocation(location Location) (io.ReadCloser, error) {
 	return r.img.FileContentsByRef(location.ref)
 }

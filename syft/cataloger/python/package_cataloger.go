@@ -3,7 +3,6 @@ package python
 import (
 	"bufio"
 	"fmt"
-	"strings"
 
 	"github.com/anchore/syft/syft/pkg"
 
@@ -11,8 +10,9 @@ import (
 )
 
 const (
-	eggMetadataGlob   = "**/*egg-info/PKG-INFO"
-	wheelMetadataGlob = "**/*dist-info/METADATA"
+	eggMetadataGlob     = "**/*egg-info/PKG-INFO"
+	eggFileMetadataGlob = "**/*.egg-info"
+	wheelMetadataGlob   = "**/*dist-info/METADATA"
 )
 
 type PackageCataloger struct{}
@@ -38,7 +38,7 @@ func (c *PackageCataloger) Catalog(resolver source.Resolver) ([]pkg.Package, err
 	for _, entry := range entries {
 		p, err := c.catalogEggOrWheel(entry)
 		if err != nil {
-			return nil, fmt.Errorf("unable to catalog python package=%+v: %w", entry.Metadata.Location.Path, err)
+			return nil, fmt.Errorf("unable to catalog python package=%+v: %w", entry.Metadata.Location.RealPath, err)
 		}
 		if p != nil {
 			packages = append(packages, *p)
@@ -53,7 +53,7 @@ func (c *PackageCataloger) getPackageEntries(resolver source.Resolver) ([]*packa
 	var metadataLocations []source.Location
 
 	// find all primary record paths
-	matches, err := resolver.FilesByGlob(eggMetadataGlob, wheelMetadataGlob)
+	matches, err := resolver.FilesByGlob(eggMetadataGlob, eggFileMetadataGlob, wheelMetadataGlob)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find files by glob: %w", err)
 	}
@@ -90,6 +90,12 @@ func (c *PackageCataloger) catalogEggOrWheel(entry *packageEntry) (*pkg.Package,
 		return nil, err
 	}
 
+	// This can happen for Python 2.7 where it is reported from an egg-info, but Python is
+	// the actual runtime, it isn't a "package". The special-casing here allows to skip it
+	if metadata.Name == "Python" {
+		return nil, nil
+	}
+
 	var licenses []string
 	if metadata.License != "" {
 		licenses = []string{metadata.License}
@@ -112,7 +118,7 @@ func (c *PackageCataloger) catalogEggOrWheel(entry *packageEntry) (*pkg.Package,
 func (c *PackageCataloger) assembleEggOrWheelMetadata(entry *packageEntry) (*pkg.PythonPackageMetadata, []source.Location, error) {
 	var sources = []source.Location{entry.Metadata.Location}
 
-	metadata, err := parseWheelOrEggMetadata(entry.Metadata.Location.Path, strings.NewReader(entry.Metadata.Contents))
+	metadata, err := parseWheelOrEggMetadata(entry.Metadata.Location.RealPath, entry.Metadata.Contents)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -146,7 +152,7 @@ func (c *PackageCataloger) processRecordFiles(entry *source.FileData) (files []p
 		sources = append(sources, entry.Location)
 
 		// parse the record contents
-		records, err := parseWheelOrEggRecord(strings.NewReader(entry.Contents))
+		records, err := parseWheelOrEggRecord(entry.Contents)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -164,7 +170,7 @@ func (c *PackageCataloger) processTopLevelPackages(entry *source.FileData) (pkgs
 
 	sources = append(sources, entry.Location)
 
-	scanner := bufio.NewScanner(strings.NewReader(entry.Contents))
+	scanner := bufio.NewScanner(entry.Contents)
 	for scanner.Scan() {
 		pkgs = append(pkgs, scanner.Text())
 	}
